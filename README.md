@@ -4,7 +4,7 @@ GTK3 desktop calendar focused on fast task entry, local-first storage, live tray
 
 ![CaLAN Screenshot](screenshot.png)
 
----
+
 
 ## Core Capabilities
 
@@ -19,7 +19,7 @@ GTK3 desktop calendar focused on fast task entry, local-first storage, live tray
 - Centralized debug logging
 - Optional Pillow-based tray badge rendering
 
----
+
 
 ## Runtime Requirements
 
