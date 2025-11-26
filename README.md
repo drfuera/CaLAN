@@ -1,6 +1,6 @@
 # CaLAN — GTK3 Desktop Calendar
 
-GTK3 desktop calendar focused on fast task entry, local-first storage, live tray feedback, and optional multi-instance synchronization.
+GTK3 desktop calendar focused on fast task entry, local-first storage, live tray feedback, and zero-config multi-instance synchronization.
 
 ![CaLAN Screenshot](screenshot.png)
 
@@ -8,16 +8,16 @@ GTK3 desktop calendar focused on fast task entry, local-first storage, live tray
 
 ## Core Capabilities
 
-- Monthly calendar with day highlighting  
-- Per-day task lists  
-- Second-level alarm engine  
-- System tray icon with dynamic task badge  
-- Standard ICS file storage  
-- Multicast-based peer synchronization  
-- True multi-instance isolation via environment variable  
-- Automatic midnight rollover handling  
-- Centralized debug logging  
-- Optional Pillow-based tray badge rendering  
+- Monthly calendar with day highlighting
+- Per-day task lists
+- Second-level alarm engine
+- System tray icon with dynamic task badge
+- Standard ICS file storage
+- Multicast-based peer synchronization
+- True multi-instance isolation via environment variable
+- Automatic midnight rollover handling
+- Centralized debug logging
+- Optional Pillow-based tray badge rendering
 
 ---
 
@@ -71,26 +71,57 @@ Each instance uses a dedicated directory:
 
 ## Data Model
 
-- All tasks stored as ICS files  
-- Local-only persistence  
-- Human-readable backups  
-- Safe for manual inspection and versioning  
+- All tasks stored as standard ICS files
+- Local-only persistence
+- Human-readable backups
+- Safe for manual inspection and versioning
+
+---
+
+## Network Synchronization
+
+CaLAN uses **UDP multicast** for real-time peer discovery and task propagation.  
+No servers, cloud services, or manual pairing are required.
+
+### How It Works
+
+- Each running instance joins a fixed multicast group on the local network
+- When tasks change, a compact update packet is broadcast to the group
+- All listening peers receive the update simultaneously
+- Remote changes are merged into the local task store
+- Updates are immediately reflected in the UI and tray badge
+
+The multicast listener starts automatically during application startup and runs continuously in the background.
+
+### Why This Works Reliably
+
+- Multicast operates at the network layer and requires no central coordination
+- All peers receive identical packets at the same time
+- No NAT traversal or routing configuration is required on LAN
+- Failure of one instance does not affect others
+- Sync traffic is extremely small and low-latency
+- Conflicts are minimized because storage remains local and authoritative
+
+This design guarantees:
+- Zero configuration
+- No single point of failure
+- Deterministic peer behavior on trusted networks
 
 ---
 
 ## Tray Behavior
 
-- Tray icon created at startup  
-- Live badge reflects current-day workload  
-- Badge renderer falls back gracefully when Pillow is unavailable  
+- Tray icon created at startup
+- Live badge reflects current-day workload
+- Badge renderer falls back gracefully when Pillow is unavailable
 
 ---
 
 ## Exit Handling
 
-- Window close triggers confirmation dialog  
-- Tray continues operating when minimized  
-- Full shutdown stops alarms, sync, and timers cleanly  
+- Window close triggers confirmation dialog
+- Tray continues operating when minimized
+- Full shutdown stops alarms, sync, and timers cleanly
 
 ---
 
