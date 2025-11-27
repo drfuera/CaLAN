@@ -176,7 +176,7 @@ class TaskManagement:
 
         color_draw = Gtk.DrawingArea()
         color_draw.set_size_request(20, 20)
-        color_draw.task_ref = task
+        color_draw.task_ref = task  # Store task reference for blinking cleanup
         color_draw.connect("draw", self.draw_color_circle)
 
         color_btn.connect(
@@ -315,6 +315,7 @@ class TaskManagement:
         # Store references
         frame.time_entry = time_entry
         frame.desc_view = desc_view
+        frame.color_draw = color_draw  # Store for blinking cleanup
 
         self.task_list.pack_start(frame, False, False, 0)
 
@@ -524,6 +525,7 @@ class TaskManagement:
                     )
                     alarm_datetime = alarm_datetime.replace(hour=hour, minute=minute)
 
+                    # FIXED: Validate alarm time is in the future
                     if alarm_datetime > datetime.now():
                         task["alarm_time"] = alarm_datetime.isoformat()
                         task["acknowledged"] = False
@@ -535,8 +537,19 @@ class TaskManagement:
                         }
                         self.save_current_tasks()
                     else:
+                        # Alarm time is in the past - show warning and disable alarm
+                        self.debug_logger.logger.warning(
+                            f"Alarm time {alarm_datetime} is in the past - disabling alarm"
+                        )
                         task["alarm"] = False
                         task["alarm_time"] = None
+                        # Update UI to reflect disabled alarm
+                        parent = entry.get_parent()
+                        while parent and not isinstance(parent, Gtk.Frame):
+                            parent = parent.get_parent()
+                        if parent and hasattr(parent, "alarm_check"):
+                            parent.alarm_check.set_active(False)
+                        self.save_current_tasks()
             except (ValueError, AttributeError):
                 pass
 
@@ -603,7 +616,28 @@ class TaskManagement:
                             hour=hour, minute=minute
                         )
 
-                        # Always allow alarm setting regardless of time
+                        # FIXED: Validate alarm time is in the future
+                        if alarm_datetime <= datetime.now():
+                            self.debug_logger.logger.warning(
+                                f"Alarm time {alarm_datetime} is in the past - cannot enable alarm"
+                            )
+                            # Show user feedback
+                            dialog = Gtk.MessageDialog(
+                                transient_for=self,
+                                flags=0,
+                                message_type=Gtk.MessageType.WARNING,
+                                buttons=Gtk.ButtonsType.OK,
+                                text="Cannot set alarm in the past",
+                            )
+                            dialog.format_secondary_text(
+                                "Please set an alarm time in the future."
+                            )
+                            dialog.run()
+                            dialog.destroy()
+                            check.set_active(False)
+                            return
+
+                        # Always allow alarm setting for future times
                         task["alarm_time"] = alarm_datetime.isoformat()
                         task["acknowledged"] = False
                         self.debug_logger.logger.debug(
@@ -762,6 +796,7 @@ class TaskManagement:
         if hasattr(self, "task_list"):
             self.task_list.remove(frame)
 
+        # FIXED: Immediate save to prevent data loss
         self.save_tasks()
 
         # Broadcast delete operation
@@ -824,8 +859,8 @@ class TaskManagement:
             del task["needs_attention"]
             self._stop_blinking_for_task(task)
 
-        # Don't save or sync immediately - wait for user to actually write something
-        # The task will be saved and synced when user types in description or other fields
+        # FIXED: Save immediately to prevent data loss
+        self.save_tasks()
 
         # Update UI
         if len(self.tasks[date_str]) == 1:
