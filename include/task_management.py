@@ -113,6 +113,11 @@ class TaskManagement:
         # Populate tasks
         date_str = self.selected_date.isoformat()
         for task in self.tasks[date_str]:
+            # BUGGFIX: Ensure task has stable UUID before adding to UI
+            if 'id' not in task or not task['id']:
+                task['id'] = str(uuid.uuid4())
+                self.debug_logger.logger.info(f"Generated UUID for task in task view: {task['id']}")
+            
             self._add_task_row(task)
 
         scrolled.add(self.task_list)
@@ -293,20 +298,8 @@ class TaskManagement:
         # Connect change handler
         desc_buffer.connect("changed", on_description_changed)
 
-        # Also connect to paste handling to catch large pastes
-        def on_paste_clipboard(text_view, clipboard):
-            """Handle paste operations with character limit"""
-            try:
-                clipboard.request_text(
-                    self._on_clipboard_text_received, (text_view, task)
-                )
-
-            except Exception as e:
-                self.debug_logger.logger.error(f"Clipboard error: {e}")
-            return True  # Stop default paste handler
-
-        # Connect paste signal
-        desc_view.connect("paste-clipboard", on_paste_clipboard)
+        # Connect paste signal with robust error handling
+        desc_view.connect("paste-clipboard", self.on_paste_clipboard, task)
 
         # Add text view directly to scroll (no frame to avoid X11 issues)
         desc_scroll.add(desc_view)
@@ -319,55 +312,130 @@ class TaskManagement:
 
         self.task_list.pack_start(frame, False, False, 0)
 
-    def _on_clipboard_text_received(self, clipboard, text, user_data):
-        """Process pasted text with character limit"""
-        try:
+    def on_paste_clipboard(self, text_view, clipboard, task):
+        """Handle paste operations with robust async error handling"""
+        MAX_TIMEOUT_MS = 1000
+        
+        # Create context for the async operation
+        paste_context = {
+            'handled': False,
+            'text_view': text_view,
+            'task': task
+        }
+        
+        def timeout_fallback():
+            """Fallback if clipboard request times out"""
+            if not paste_context['handled']:
+                self.debug_logger.logger.warning("Clipboard request timeout - using default paste")
+                # Use default GTK paste behavior as fallback
+                return False  # Remove timeout
+            
+        def async_callback(clipboard, text, user_data):
+            """Callback when clipboard text is received"""
+            paste_context['handled'] = True
+            
             if not text:
+                self.debug_logger.logger.info("No text in clipboard - cannot paste")
+                # Show user feedback
+                self._show_paste_error_dialog(
+                    "No Text Available", 
+                    "The clipboard doesn't contain any text to paste."
+                )
                 return
+            
+            # Process the pasted text
+            self._process_pasted_text(text_view, task, text)
+        
+        try:
+            # Try async text request with timeout protection
+            clipboard.request_text(async_callback, None)
+            
+            # Set safety timeout (1 second)
+            GLib.timeout_add(MAX_TIMEOUT_MS, timeout_fallback)
+            
+            # Block default initially - we'll handle it async
+            return True
+            
+        except Exception as e:
+            self.debug_logger.logger.error(f"Clipboard setup failed: {e}")
+            # Allow default paste on immediate failure
+            return False
 
-            text_view, task = user_data
-            MAX_DESCRIPTION_LENGTH = 10000
-
-            # Get current text
+    def _process_pasted_text(self, text_view, task, pasted_text):
+        """Process pasted text with character limit validation"""
+        MAX_DESCRIPTION_LENGTH = 10000
+        
+        try:
             buffer = text_view.get_buffer()
             start_iter = buffer.get_start_iter()
             end_iter = buffer.get_end_iter()
             current_text = buffer.get_text(start_iter, end_iter, True)
-
+            
             # Calculate available space
             available_chars = MAX_DESCRIPTION_LENGTH - len(current_text)
-
+            
             if available_chars <= 0:
-                # No space left
-                self.debug_logger.logger.warning(
-                    "Cannot paste - task description at maximum length"
+                self._show_paste_error_dialog(
+                    "Cannot Paste",
+                    "Task description has reached the maximum length of 10,000 characters."
                 )
                 return
-
+            
             # Truncate pasted text if needed
-            if len(text) > available_chars:
-                text = text[:available_chars]
-                self.debug_logger.logger.warning(
-                    f"Pasted text truncated to {available_chars} characters"
+            original_length = len(pasted_text)
+            if original_length > available_chars:
+                pasted_text = pasted_text[:available_chars]
+                self._show_paste_warning_dialog(
+                    "Text Truncated",
+                    f"Pasted text was truncated from {original_length} to {available_chars} characters to fit the limit."
                 )
-
+            
             # Insert text at cursor position
-            buffer.insert_at_cursor(text)
-
-            # Enforce limit again after paste
-            def enforce_character_limit(buffer):
-                """Enforce character limit on text buffer"""
-                text = buffer.get_text(
-                    buffer.get_start_iter(), buffer.get_end_iter(), True
-                )
-                if len(text) > MAX_DESCRIPTION_LENGTH:
-                    buffer.set_text(text[:MAX_DESCRIPTION_LENGTH])
-                    buffer.place_cursor(buffer.get_end_iter())
-
-            enforce_character_limit(buffer)
+            buffer.insert_at_cursor(pasted_text)
+            
+            # Final safety check
+            final_text = buffer.get_text(
+                buffer.get_start_iter(), buffer.get_end_iter(), True
+            )
+            if len(final_text) > MAX_DESCRIPTION_LENGTH:
+                buffer.set_text(final_text[:MAX_DESCRIPTION_LENGTH])
+                buffer.place_cursor(buffer.get_end_iter())
+            
+            # Update task timestamp
             task["updated_at"] = datetime.now().isoformat()
+            
         except Exception as e:
-            self.debug_logger.logger.error(f"Error in clipboard text processing: {e}")
+            self.debug_logger.logger.error(f"Error processing pasted text: {e}")
+            self._show_paste_error_dialog(
+                "Paste Failed",
+                f"An error occurred while pasting: {str(e)}"
+            )
+
+    def _show_paste_error_dialog(self, title, message):
+        """Show error dialog for paste operation"""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=title
+        )
+        dialog.format_secondary_text(message)
+        dialog.run()
+        dialog.destroy()
+
+    def _show_paste_warning_dialog(self, title, message):
+        """Show warning dialog for paste operation"""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK,
+            text=title
+        )
+        dialog.format_secondary_text(message)
+        dialog.run()
+        dialog.destroy()
 
     def _on_desc_focus_in(self, text_view, event):
         """Handle focus in on description field"""
