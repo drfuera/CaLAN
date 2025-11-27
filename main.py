@@ -3,14 +3,14 @@
 GTK3 Desktop Calendar Application
 Features: Visual calendar, task management, alarms, system tray, ICS storage, multicast sync
 
-	John 14:6
-	I am the way, and the truth, and the life. No one comes to the Father except through me.
+        John 14:6
+        I am the way, and the truth, and the life. No one comes to the Father except through me.
 
-	Romans 6:23
-	For the wages of sin is death, but the free gift of God is eternal life in Christ Jesus our Lord.
+        Romans 6:23
+        For the wages of sin is death, but the free gift of God is eternal life in Christ Jesus our Lord.
 
-	Romans 10:13
-	For everyone who calls on the name of the Lord will be saved.
+        Romans 10:13
+        For everyone who calls on the name of the Lord will be saved.
 """
 
 import logging
@@ -369,6 +369,14 @@ class CalendarApp(
                 GLib.source_remove(timer_id)
             self._attention_blink_timers.clear()
 
+        # Clean up tray blinking timer
+        if (
+            hasattr(self, "tray_blink_timer_id")
+            and self.tray_blink_timer_id is not None
+        ):
+            GLib.source_remove(self.tray_blink_timer_id)
+            self.tray_blink_timer_id = None
+
         # Log final state (debug only)
         self.debug_logger.log_comprehensive_state()
         self.debug_logger.logger.debug("Application quit complete")
@@ -377,6 +385,16 @@ class CalendarApp(
         super().quit_application()
 
         Gtk.main_quit()
+
+    def start_tray_blinking(self):
+        """Start blinking tray icon when app is minimized and new updates arrive"""
+        # Delegate to TrayIcon class
+        super().start_tray_blinking()
+
+    def stop_tray_blinking(self):
+        """Stop blinking tray icon and restore normal state"""
+        # Delegate to TrayIcon class
+        super().stop_tray_blinking()
 
     def on_delete_event(self, widget, event):
         """Handle window close - show quit dialog"""
@@ -463,7 +481,7 @@ class CalendarApp(
         widget_id = id(widget)
 
         # FIXED: Validate task_ref is set instead of self-assignment
-        if not hasattr(widget, 'task_ref'):
+        if not hasattr(widget, "task_ref"):
             self.debug_logger.logger.warning(
                 f"Widget {widget_id} missing task_ref - blinking cleanup may fail"
             )
@@ -518,7 +536,7 @@ class CalendarApp(
         widgets_to_remove = []
         for widget_id, widget in getattr(self, "_attention_widgets", {}).items():
             # Match by task ID instead of object identity
-            if hasattr(widget, 'task_ref'):
+            if hasattr(widget, "task_ref"):
                 widget_task_id = widget.task_ref.get("id")
                 if widget_task_id == task_id:
                     widgets_to_remove.append(widget_id)
@@ -533,7 +551,7 @@ class CalendarApp(
                 widget = self._attention_widgets[widget_id]
                 widget.set_opacity(1.0)
                 # Disconnect any signals
-                if hasattr(widget, '_blink_connections'):
+                if hasattr(widget, "_blink_connections"):
                     for conn_id in widget._blink_connections:
                         try:
                             widget.disconnect(conn_id)
@@ -542,7 +560,10 @@ class CalendarApp(
                 del self._attention_widgets[widget_id]
 
         # FIXED: Additional cleanup to prevent memory leaks
-        if hasattr(self, "_attention_blink_timers") and not self._attention_blink_timers:
+        if (
+            hasattr(self, "_attention_blink_timers")
+            and not self._attention_blink_timers
+        ):
             del self._attention_blink_timers
         if hasattr(self, "_attention_widgets") and not self._attention_widgets:
             del self._attention_widgets
