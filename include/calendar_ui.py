@@ -4,6 +4,7 @@ Calendar UI components for the Calendar App
 
 import calendar
 import json
+import uuid
 from datetime import datetime
 
 import cairo
@@ -150,11 +151,14 @@ class CalendarUI:
         self.update_calendar()
 
     def update_calendar(self):
-        """Update the calendar grid display"""
+        """Update the calendar grid display - FIXED: Destroy widgets to cleanup timers"""
 
-        # Clear existing grid
+        # Clear existing grid and destroy widgets to cleanup timers
         for child in self.calendar_grid.get_children():
             self.calendar_grid.remove(child)
+            # FIXED: Destroy widget to trigger cleanup callbacks
+            # This will call the on_widget_destroy callback registered in _add_blinking_effect
+            child.destroy()
 
         # Add day headers
         days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -284,6 +288,13 @@ class CalendarUI:
         # Task rows (each task gets its own row)
         if date_str in self.tasks:
             for i, task in enumerate(self.tasks[date_str][:3]):
+                # BUGGFIX: Ensure task has stable UUID instead of using index as fallback
+                if 'id' not in task or not task['id']:
+                    task['id'] = str(uuid.uuid4())
+                    self.debug_logger.logger.info(f"Generated UUID for task without ID: {task['id']}")
+                
+                task_id = task['id']  # Always use the UUID, never index
+
                 # Wrap task row in EventBox to make it draggable
                 task_event_box = Gtk.EventBox()
 
@@ -292,6 +303,7 @@ class CalendarUI:
 
                 # Color dot or attention indicator - align to top
                 color_dot = Gtk.Label()
+                color_dot.task_ref = task  # FIXED: Set task_ref for blinking cleanup
                 color = task.get("color", "#4CAF50")
 
                 # Check if task needs attention
@@ -373,8 +385,6 @@ class CalendarUI:
                     "leave-notify-event",
                     lambda w, e: self._set_cursor(w, e, Gdk.CursorType.ARROW),
                 )
-
-                task_id = task.get("id", str(i))
 
                 task_event_box.connect(
                     "drag-begin", self.on_task_drag_begin, date, task_id, task
@@ -566,15 +576,14 @@ class CalendarUI:
                     task_to_move = None
                     task_index = None
 
-                    # FIXED: Don't move wrong task if ID not found
-                    if task_id is not None:
-                        for i, task in enumerate(self.tasks[source_date_str]):
-                            if task.get("id", str(i)) == task_id:
-                                task_to_move = task
-                                task_index = i
-                                break
+                    # BUGGFIX: Use only UUID-based lookup, never index fallback
+                    for i, task in enumerate(self.tasks[source_date_str]):
+                        if task.get("id") == task_id:  # Only match by UUID
+                            task_to_move = task
+                            task_index = i
+                            break
 
-                    # FIXED: Abort if task not found instead of moving wrong task
+                    # BUGGFIX: Abort if task not found instead of moving wrong task
                     if task_to_move is None:
                         self.debug_logger.logger.warning(
                             f"Task with ID {task_id} not found in source date {source_date_str}"
