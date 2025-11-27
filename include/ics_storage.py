@@ -5,34 +5,63 @@ Handles conversion between internal task format and VTODO format
 
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from icalendar import Alarm, Calendar, Todo
 
 
 class ICSStorage:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, debug_logger=None):
         """Initialize ICS storage"""
         self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
         self.ics_file = os.path.join(self.data_dir, "calendar.ics")
+        self.debug_logger = debug_logger
+
+    def _log_info(self, message):
+        """Log info message using debug_logger if available, otherwise print"""
+        if self.debug_logger and hasattr(self.debug_logger, 'logger'):
+            self.debug_logger.logger.info(message)
+        else:
+            print(message)
+
+    def _log_debug(self, message):
+        """Log debug message using debug_logger if available, otherwise print"""
+        if self.debug_logger and hasattr(self.debug_logger, 'logger'):
+            self.debug_logger.logger.debug(message)
+        else:
+            print(message)
+
+    def _log_error(self, message):
+        """Log error message using debug_logger if available, otherwise print"""
+        if self.debug_logger and hasattr(self.debug_logger, 'logger'):
+            self.debug_logger.logger.error(message)
+        else:
+            print(message)
+
+    def _log_warning(self, message):
+        """Log warning message using debug_logger if available, otherwise print"""
+        if self.debug_logger and hasattr(self.debug_logger, 'logger'):
+            self.debug_logger.logger.warning(message)
+        else:
+            print(message)
 
     def load_tasks(self):
         """Load tasks from ICS file and convert to internal format"""
         if not os.path.exists(self.ics_file):
-            print(f"ICS file not found: {self.ics_file}")
+            self._log_info(f"ICS file not found: {self.ics_file}")
             return {}
 
-        print(
+        self._log_info(
             f"ICS file found: {self.ics_file}, size: {os.path.getsize(self.ics_file)} bytes"
         )
 
         try:
             with open(self.ics_file, "rb") as f:
                 file_content = f.read()
-                print(f"ICS file content length: {len(file_content)} bytes")
+                self._log_debug(f"ICS file content length: {len(file_content)} bytes")
                 cal = Calendar.from_ical(file_content)
-                print(f"Calendar components found: {len(list(cal.walk()))}")
+                self._log_debug(f"Calendar components found: {len(list(cal.walk()))}")
 
             tasks = {}
             task_count = 0
@@ -40,13 +69,14 @@ class ICSStorage:
             for component in cal.walk("VTODO"):
                 # Skip deleted tasks
                 status = component.get("STATUS", "")
-                if status == "DELETED":
-                    print(
+                # FIXED: Handle both DELETED and CANCELLED status
+                if status in ["DELETED", "CANCELLED"]:
+                    self._log_debug(
                         f"Skipping deleted task: {component.get('summary', 'Unknown')}"
                     )
                     continue
 
-                print(
+                self._log_debug(
                     f"Processing VTODO component: {component.get('summary', 'Unknown')}"
                 )
 
@@ -55,33 +85,33 @@ class ICSStorage:
 
                 # Get date from DTSTART or DUE
                 date_obj = component.get("DTSTART") or component.get("DUE")
-                print(f"Date object found: {date_obj}")
+                self._log_debug(f"Date object found: {date_obj}")
                 if date_obj:
                     # Handle both datetime and date objects
                     if hasattr(date_obj.dt, "date"):
                         date_str = date_obj.dt.date().isoformat()
                     else:
                         date_str = date_obj.dt.isoformat()
-                    print(f"Date string: {date_str}")
+                    self._log_debug(f"Date string: {date_str}")
 
                     if date_str not in tasks:
                         tasks[date_str] = []
                     tasks[date_str].append(task)
                     task_count += 1
-                    print(
+                    self._log_debug(
                         f"Loaded task: {task.get('description', 'Unknown')} for date {date_str}"
                     )
                 else:
-                    print(
-                        f"Warning: Task without date: {task.get('description', 'Unknown')}"
+                    self._log_warning(
+                        f"Task without date: {task.get('description', 'Unknown')}"
                     )
-                    print(f"Component properties: {list(component.keys())}")
+                    self._log_debug(f"Component properties: {list(component.keys())}")
 
-            print(f"Successfully loaded {task_count} tasks from {self.ics_file}")
+            self._log_info(f"Successfully loaded {task_count} tasks from {self.ics_file}")
             return tasks
 
         except Exception as e:
-            print(f"Error loading ICS file: {e}")
+            self._log_error(f"Error loading ICS file: {e}")
             return {}
 
     def save_tasks(self, tasks):
@@ -121,18 +151,19 @@ class ICSStorage:
             if os.path.exists(backup_file):
                 os.remove(backup_file)
 
+            self._log_debug(f"Successfully saved {len(tasks)} task dates to {self.ics_file}")
             return True
 
         except Exception as e:
-            print(f"Error saving ICS file: {e}")
+            self._log_error(f"Error saving ICS file: {e}")
 
             # Restore backup if something went wrong
             if os.path.exists(backup_file) and not os.path.exists(self.ics_file):
                 try:
                     os.replace(backup_file, self.ics_file)
-                    print("Restored backup file after save failure")
+                    self._log_info("Restored backup file after save failure")
                 except Exception as restore_error:
-                    print(f"Failed to restore backup: {restore_error}")
+                    self._log_error(f"Failed to restore backup: {restore_error}")
 
             # Clean up temporary files
             for temp_path in [temp_file, backup_file]:
@@ -156,9 +187,9 @@ class ICSStorage:
         summary = task.get("description", "No description")
         todo.add("summary", summary)
 
-        # Status
+        # Status - FIXED: Use proper status values
         if task.get("status") == "DELETED":
-            todo.add("status", "DELETED")
+            todo.add("status", "CANCELLED")  # FIXED: Use standard status
         else:
             todo.add("status", "NEEDS-ACTION")
 
@@ -171,6 +202,11 @@ class ICSStorage:
                 hour, minute = map(int, time_str.split(":"))
                 dt = datetime.combine(date_obj, datetime.min.time())
                 dt = dt.replace(hour=hour, minute=minute)
+                
+                # FIXED: Use timezone-aware datetime
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                    
                 todo.add("dtstart", dt)
                 todo.add("due", dt)
             except ValueError:
@@ -187,18 +223,24 @@ class ICSStorage:
         if profile_name:
             todo.add("x-calan-profile", profile_name)
 
-        # Created and modified timestamps
+        # Created and modified timestamps - FIXED: Use timezone-aware
         created_at = task.get("created_at")
         if created_at:
-            todo.add("created", datetime.fromisoformat(created_at))
+            created_dt = datetime.fromisoformat(created_at)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            todo.add("created", created_dt)
         else:
-            todo.add("created", datetime.now())
+            todo.add("created", datetime.now(timezone.utc))
 
         updated_at = task.get("updated_at")
         if updated_at:
-            todo.add("last-modified", datetime.fromisoformat(updated_at))
+            updated_dt = datetime.fromisoformat(updated_at)
+            if updated_dt.tzinfo is None:
+                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+            todo.add("last-modified", updated_dt)
         else:
-            todo.add("last-modified", datetime.now())
+            todo.add("last-modified", datetime.now(timezone.utc))
 
         # Alarm
         if task.get("alarm") and task.get("alarm_time"):
@@ -206,8 +248,10 @@ class ICSStorage:
             alarm.add("action", "DISPLAY")
             alarm.add("description", f"Reminder: {summary}")
 
-            # Calculate trigger time
+            # Calculate trigger time - FIXED: Use timezone-aware
             alarm_time = datetime.fromisoformat(task["alarm_time"])
+            if alarm_time.tzinfo is None:
+                alarm_time = alarm_time.replace(tzinfo=timezone.utc)
             alarm.add("trigger", alarm_time)
 
             # Acknowledged status (custom property)
@@ -224,15 +268,16 @@ class ICSStorage:
         """Convert VTODO component to internal task format"""
         task = {}
 
-        # UID
-        task["id"] = str(todo.get("uid", str(uuid.uuid4())))
+        # UID - BUGGFIX: Hantera None-värden korrekt
+        uid = todo.get("uid")
+        task["id"] = str(uid) if uid is not None else str(uuid.uuid4())
 
         # Summary -> description
         task["description"] = str(todo.get("summary", "No description"))
 
-        # Status
+        # Status - FIXED: Handle both DELETED and CANCELLED
         status = str(todo.get("status", "NEEDS-ACTION"))
-        if status == "DELETED":
+        if status in ["DELETED", "CANCELLED"]:
             task["status"] = "DELETED"
 
         # Time
@@ -317,5 +362,5 @@ class ICSStorage:
             return tasks
 
         except Exception as e:
-            print(f"Error loading ICS file with metadata: {e}")
+            self._log_error(f"Error loading ICS file with metadata: {e}")
             return {}
