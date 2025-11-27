@@ -4,7 +4,7 @@ Alarm management functionality for the Calendar App
 
 import hashlib
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 
 from gi.repository import GLib, Gtk
 
@@ -40,24 +40,18 @@ class AlarmManagement:
                                 if alarm_time.tzinfo is not None:
                                     alarm_time = alarm_time.replace(tzinfo=None)
 
-                                # Only trigger alarms exactly at the set time
-                                # 1. Alarm time is exactly now or has just passed
-                                # 2. Not already acknowledged
+                                # FIXED: Increase alarm window from 1 to 60 seconds
                                 time_diff = (now - alarm_time).total_seconds()
 
-                                # Trigger alarm exactly at the set time (within 1 second)
-                                if (
-                                    0 <= time_diff <= 1
-                                ):  # Exactly at alarm time or up to 1 second after
+                                # Trigger alarm within 60 second window
+                                if 0 <= time_diff <= 60:
                                     self.triggered_alarms.add(alarm_id)
                                     GLib.idle_add(
                                         self.show_alarm_notification, date_str, task
                                     )
-                                elif time_diff > 300:
-                                    # Alarm is more than 5 minutes old - auto-acknowledge it
-                                    # This prevents old alarms from showing up
-                                    task["acknowledged"] = True
-                                    self.save_tasks()
+                                
+                                # FIXED: Remove auto-acknowledge of old alarms
+                                # This was causing alarms to disappear without user interaction
 
                             except (ValueError, TypeError):
                                 pass
@@ -90,11 +84,14 @@ class AlarmManagement:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # FIXED: Log sound playback errors instead of silent fail
+            self.debug_logger.logger.error(f"Failed to play alarm sound: {e}")
 
+        # FIXED: Set proper parent window for the dialog
         dialog = Gtk.Dialog(
             title="⏰ Task Reminder",
+            transient_for=self,
             flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
         )
         dialog.set_default_size(450, 350)
