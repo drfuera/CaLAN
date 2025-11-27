@@ -32,6 +32,10 @@ class TrayIcon:
         # Store reference to main app
         self.main_app = self
 
+        # FIXED: Cache font paths during initialization for better performance
+        self.font_paths_cache = self._discover_font_paths()
+        self.debug_logger.logger.debug(f"Cached {len(self.font_paths_cache)} font paths")
+
         # Log icon path for debugging
         if hasattr(self, "icon_path"):
             self.debug_logger.logger.debug(
@@ -92,7 +96,7 @@ class TrayIcon:
     def _get_icon_name(self):
         """Get the appropriate icon name or path"""
         # First try custom icon path
-        if hasattr(self, "icon_path") and os.path.exists(self.icon_path):
+        if hasattr(self, "icon_path") and self.icon_path is not None and os.path.exists(self.icon_path):
             self.debug_logger.logger.debug(f"Using custom icon: {self.icon_path}")
             return self.icon_path
 
@@ -146,7 +150,7 @@ class TrayIcon:
             icon_name = self._get_icon_name()
 
             # Check if it's a file path or icon name
-            if os.path.exists(icon_name):
+            if icon_name is not None and os.path.exists(icon_name):
                 self.tray_icon.set_from_file(icon_name)
                 self.debug_logger.logger.debug(
                     f"StatusIcon: Set from file: {icon_name}"
@@ -211,7 +215,7 @@ class TrayIcon:
         pass
 
     def update_tray_icon_badge(self):
-        """Update tray icon with task count badge"""
+        """Update tray icon with task count badge - FIXED NULL REFERENCE"""
         try:
             # Count today's tasks
             today_str = datetime.now().strftime("%Y-%m-%d")
@@ -301,7 +305,7 @@ class TrayIcon:
             self.debug_logger.log_exception(e, "_update_app_indicator_badge")
 
     def _update_status_icon_badge(self, task_count):
-        """Update StatusIcon badge"""
+        """Update StatusIcon badge - FIXED NULL REFERENCE"""
         if self.debug_logger.logger.isEnabledFor(logging.INFO):
             self.debug_logger.logger.info(
                 f"StatusIcon badge update with {task_count} tasks"
@@ -313,32 +317,33 @@ class TrayIcon:
             return
 
         try:
-            # Check if we have a valid icon path
+            # FIXED: Proper null reference check for icon_path
             if not hasattr(self, "icon_path") or not self.icon_path:
                 if self.debug_logger.logger.isEnabledFor(logging.WARNING):
                     self.debug_logger.logger.warning(
-                        "No icon_path available for badge update"
+                        "No valid icon_path available for badge update"
                     )
                 return
 
-            if not os.path.exists(self.icon_path):
+            icon_path = str(self.icon_path)  # Ensure it's a string
+            if not os.path.exists(icon_path):
                 if self.debug_logger.logger.isEnabledFor(logging.WARNING):
                     self.debug_logger.logger.warning(
-                        f"Icon path does not exist: {self.icon_path}"
+                        f"Icon path does not exist: {icon_path}"
                     )
                 return
 
             if self.debug_logger.logger.isEnabledFor(logging.INFO):
                 self.debug_logger.logger.info(
-                    f"Updating badge with {task_count} tasks using icon: {self.icon_path}"
+                    f"Updating badge with {task_count} tasks using icon: {icon_path}"
                 )
 
             # Load and modify icon with badge
             try:
-                img = Image.open(self.icon_path).convert("RGBA")
+                img = Image.open(icon_path).convert("RGBA")
             except Exception as e:
                 self.debug_logger.logger.error(
-                    f"Failed to load icon {self.icon_path}: {e}"
+                    f"Failed to load icon {icon_path}: {e}"
                 )
                 return
 
@@ -406,67 +411,59 @@ class TrayIcon:
             self.debug_logger.log_exception(e, "_update_status_icon_badge")
 
     def _get_font(self, size):
-        """Get font for badge text"""
-        font_paths = self._discover_font_paths()
-
-        for font_path in font_paths:
+        """Get font for badge text - FIXED: Use cached font paths for performance"""
+        # FIXED: Use cached font paths instead of discovering every time
+        for font_path in self.font_paths_cache:
             if os.path.exists(font_path):
                 try:
                     return ImageFont.truetype(font_path, size)
                 except Exception:
                     continue
 
+        # Fallback to default font if no cached fonts work
         try:
             return ImageFont.load_default()
         except Exception:
             return None
 
     def _discover_font_paths(self):
-        """Discover available font paths dynamically across different systems"""
+        """Discover available font paths dynamically across different systems - OPTIMIZED"""
         font_paths = []
 
-        # Common font directories across different systems
+        # Common font directories across different systems - LIMITED SET for performance
         font_dirs = [
             # Linux standard directories
-            "/usr/share/fonts",
-            "/usr/local/share/fonts",
-            "~/.local/share/fonts",
-            "~/.fonts",
+            "/usr/share/fonts/truetype",
+            "/usr/share/fonts/dejavu",
+            "/usr/share/fonts/liberation",
+            "/usr/share/fonts/truetype/freefont",
+            "/usr/share/fonts/truetype/ubuntu",
+            "/usr/share/fonts/truetype/noto",
             # macOS font directories
             "/Library/Fonts",
             "/System/Library/Fonts",
-            "~/Library/Fonts",
             # Windows font directory (if running under WSL or similar)
             "/mnt/c/Windows/Fonts",
-            "/usr/share/windows-fonts",
         ]
 
-        # Common bold font names to look for
-        bold_font_patterns = [
+        # Common bold font names to look for - LIMITED SET for performance
+        bold_font_files = [
             # DejaVu fonts (common on many Linux distros)
-            "**/dejavu/DejaVuSans-Bold.ttf",
-            "**/DejaVuSans-Bold.ttf",
+            "DejaVuSans-Bold.ttf",
             # Liberation fonts (common on Fedora, RHEL, etc.)
-            "**/liberation/LiberationSans-Bold.ttf",
-            "**/LiberationSans-Bold.ttf",
+            "LiberationSans-Bold.ttf",
             # FreeFont (common on various distros)
-            "**/freefont/FreeSansBold.ttf",
-            "**/FreeSansBold.ttf",
+            "FreeSansBold.ttf",
             # Ubuntu fonts
-            "**/ubuntu/Ubuntu-B.ttf",
-            "**/Ubuntu-B.ttf",
+            "Ubuntu-B.ttf",
             # Noto fonts (modern standard on many systems)
-            "**/noto/NotoSans-Bold.ttf",
-            "**/NotoSans-Bold.ttf",
+            "NotoSans-Bold.ttf",
             # Arial (common on Windows/macOS and some Linux distros)
-            "**/Arial Bold.ttf",
-            "**/arialbd.ttf",
+            "Arial Bold.ttf",
+            "arialbd.ttf",
             # Helvetica (common on macOS)
-            "**/Helvetica Bold.ttf",
-            "**/Helvetica-Bold.ttf",
-            # Generic sans-serif bold fonts
-            "**/*Sans*Bold*.ttf",
-            "**/*sans*bold*.ttf",
+            "Helvetica Bold.ttf",
+            "Helvetica-Bold.ttf",
         ]
 
         # Expand home directories and check which font directories exist
@@ -476,50 +473,26 @@ class TrayIcon:
             if os.path.exists(expanded_dir) and os.path.isdir(expanded_dir):
                 existing_font_dirs.append(expanded_dir)
 
-        # Search for fonts in existing directories
+        # FIXED: Non-recursive search for performance
         for font_dir in existing_font_dirs:
-            for pattern in bold_font_patterns:
-                try:
-                    # Use glob to find matching font files
-                    import glob
+            for font_file in bold_font_files:
+                font_path = os.path.join(font_dir, font_file)
+                if os.path.exists(font_path):
+                    font_paths.append(font_path)
+                    # Early exit if we found enough fonts
+                    if len(font_paths) >= 3:
+                        break
+            if len(font_paths) >= 3:
+                break
 
-                    search_pattern = os.path.join(font_dir, pattern)
-                    matches = glob.glob(search_pattern, recursive=True)
-
-                    for match in matches:
-                        if os.path.isfile(match) and match not in font_paths:
-                            font_paths.append(match)
-
-                            # Don't log individual fonts to reduce verbosity
-                except Exception:
-                    continue
-
-        # Log font discovery summary (only in debug mode)
-        if hasattr(self, "debug_logger") and self.debug_logger.logger.isEnabledFor(
-            logging.DEBUG
-        ):
-            self.debug_logger.logger.debug(
-                f"Found {len(font_paths)} fonts for badge text"
-            )
-
-        # If no fonts found, fall back to original hardcoded paths
-        if not font_paths:
-            font_paths = [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-                "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-                "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
-            ]
-
-        # Also try to use system fontconfig if available
+        # Also try to use system fontconfig if available - MOST EFFICIENT
         try:
             import subprocess
-
             result = subprocess.run(
                 ["fc-match", "-f", "%{file}", "sans:bold"],
                 capture_output=True,
                 text=True,
-                timeout=2,
+                timeout=1,  # Shorter timeout
             )
             if result.returncode == 0 and os.path.exists(result.stdout.strip()):
                 system_font = result.stdout.strip()
@@ -527,6 +500,14 @@ class TrayIcon:
                     font_paths.insert(0, system_font)  # Prioritize system font
         except Exception:
             pass  # fontconfig not available, continue with other methods
+
+        # Log font discovery summary
+        if hasattr(self, "debug_logger") and self.debug_logger.logger.isEnabledFor(
+            logging.DEBUG
+        ):
+            self.debug_logger.logger.debug(
+                f"Found {len(font_paths)} fonts for badge text"
+            )
 
         return font_paths
 
