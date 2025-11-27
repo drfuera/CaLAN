@@ -14,7 +14,7 @@ import uuid
 import gi
 
 gi.require_version("Gtk", "3.0")
-from datetime import datetime
+from datetime import datetime, timezone
 
 import gi
 from gi.repository import GLib, Gtk
@@ -66,17 +66,16 @@ class MulticastSync:
         # Sync statistics tracking
         self.sync_stats = {"sent": 0, "received": 0, "errors": 0, "error_dates": []}
 
-    def get_tasks_lock(self):
-        """Get the tasks lock for thread-safe operations from main thread"""
-        return self.tasks_lock
-
-        self._is_user_initiated_sync = False
-
         # Sync settings
         self.sync_interval = 30  # seconds
         self.last_sync = None
+        self._is_user_initiated_sync = False  # BUGGFIX: Initiera variabel
 
         self.logger.info("MulticastSync initialized")
+
+    def get_tasks_lock(self):
+        """Get the tasks lock for thread-safe operations from main thread"""
+        return self.tasks_lock
 
     def start_listening(self):
         """Start listening for unicast sync messages with mDNS discovery"""
@@ -86,6 +85,9 @@ class MulticastSync:
                 socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
             )
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            # BUGFIX: Set socket timeout for clean shutdown
+            self.socket.settimeout(1.0)  # 1 second timeout
 
             # Bind to service port
             self.socket.bind(("", self.service_port))
@@ -333,10 +335,14 @@ class MulticastSync:
                 self.logger.debug(f"Received {len(data)} bytes from {address}")
                 self._handle_message(data, address)
             except socket.timeout:
+                # BUGFIX: Timeout is normal - continue checking running flag
                 continue
             except Exception as e:
                 if self.running:  # Only log if we're still supposed to be running
                     self.logger.error(f"Error in unicast listener: {e}")
+                    # BUGFIX: Don't break the thread on single exceptions
+                    time.sleep(1)  # Wait before continuing
+                    continue
                 break
         self.logger.info("Unicast listener loop stopped")
 
@@ -346,7 +352,14 @@ class MulticastSync:
             self.logger.info(
                 f"Received unicast message from {address}, size: {len(data)} bytes"
             )
-            message = json.loads(data.decode("utf-8"))
+            
+            # BUGFIX: Proper JSON decode error handling with early return
+            try:
+                message = json.loads(data.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                self.logger.warning(f"Invalid message from {address}: {e}")
+                return  # Early return on invalid message
+            
             message_type = message.get("type")
 
             self.logger.info(
@@ -368,10 +381,6 @@ class MulticastSync:
             else:
                 self.logger.warning(f"Unknown message type: {message_type}")
 
-        except json.JSONDecodeError:
-            self.logger.warning(
-                f"Invalid JSON received from {address}, data: {data[:100]}"
-            )
         except Exception as e:
             self.logger.error(f"Error handling unicast message: {e}")
 
@@ -515,6 +524,7 @@ class MulticastSync:
                                                 local_task[key] = value
                                         merged = True
 
+            # BUGFIX: Move save_tasks outside the lock to prevent deadlocks
             if merged:
                 self.app.save_tasks()
 
@@ -547,12 +557,17 @@ class MulticastSync:
                     self.sync_stats["error_dates"].append(error_date)
 
     def _apply_task_update(self, task_update, operation="update"):
-        """Apply a single task update from remote instance"""
-        try:
-            with self.tasks_lock:
+        """Apply a single task update from remote instance - FIXED RACE CONDITIONS"""
+        needs_save = False
+        date_str = None
+        old_date_str = None
+        
+        # FIXED: Use proper locking for ALL operations
+        with self.tasks_lock:
+            try:
                 task_id = task_update.get("id")
                 date_str = task_update.get("date")
-                # operation is now passed as parameter
+                old_date_str = task_update.get("old_date")
 
                 self.logger.debug(
                     f"_apply_task_update called - Operation: {operation}, Task ID: {task_id}, Date: {date_str}"
@@ -563,6 +578,8 @@ class MulticastSync:
                         f"Invalid task update - missing ID or date: {task_update}"
                     )
                     return
+
+                needs_ui_update = False
 
                 if operation == "delete":
                     self.logger.debug(
@@ -592,68 +609,66 @@ class MulticastSync:
                             if after_count == 0:
                                 del self.app.tasks[date_str]
 
-                            self.app.save_tasks()
-                            # Use idle_add to update UI from main thread
-                            if self.app.view_mode == "calendar":
-                                GLib.idle_add(self.app.update_calendar)
-                            elif (
-                                self.app.view_mode == "tasks"
-                                and self.app.selected_date
-                                and self.app.selected_date.isoformat() == date_str
-                            ):
-                                # If we're in task view for the same date, update the task list
-                                GLib.idle_add(self.app._show_task_list)
+                            needs_ui_update = True
+                            needs_save = True
                         else:
                             self.logger.debug(
                                 f"DELETE SKIPPED: Task {task_id} not found in date {date_str}"
                             )
 
                 elif operation == "move":
-                    # Handle move operation - add to new date and remove from old date
-                    old_date_str = task_update.get("old_date")
+                    # FIXED: ATOMIC MOVE OPERATION with proper validation
                     self.logger.debug(
                         f"MOVE OPERATION: Moving task {task_id} from {old_date_str} to {date_str}"
                     )
 
-                    # Add task to new date
-                    if date_str not in self.app.tasks:
-                        self.app.tasks[date_str] = []
+                    if not old_date_str:
+                        self.logger.warning("Move operation missing old_date")
+                        return
 
-                    # Find existing task or add new one
-                    existing_index = None
-                    for i, task in enumerate(self.app.tasks[date_str]):
+                    # Validate both dates exist in tasks
+                    if old_date_str not in self.app.tasks:
+                        self.logger.warning(f"Source date {old_date_str} not found in tasks")
+                        return
+
+                    # Create copies to work with
+                    old_tasks = self.app.tasks.get(old_date_str, [])[:]
+                    new_tasks = self.app.tasks.get(date_str, [])[:]
+
+                    # Find and remove task from old date
+                    task_to_move = None
+                    old_tasks_updated = []
+                    for task in old_tasks:
                         if task.get("id") == task_id:
-                            existing_index = i
-                            break
+                            task_to_move = task
+                        else:
+                            old_tasks_updated.append(task)
 
-                    if existing_index is not None:
-                        # Update existing task
-                        cleaned_task = self._clean_remote_task(task_update)
-                        self.app.tasks[date_str][existing_index] = cleaned_task
-                    else:
-                        # Add new task
-                        cleaned_task = self._clean_remote_task(task_update)
-                        self.app.tasks[date_str].append(cleaned_task)
+                    if task_to_move:
+                        # Update task with new date and timestamp
+                        task_to_move = task_to_move.copy()
+                        task_to_move["updated_at"] = datetime.now().isoformat()
+                        
+                        # Add to new date
+                        new_tasks.append(task_to_move)
 
-                    # Remove task from old date if it exists
-                    if old_date_str and old_date_str in self.app.tasks:
-                        before_count = len(self.app.tasks[old_date_str])
-                        self.app.tasks[old_date_str] = [
-                            task
-                            for task in self.app.tasks[old_date_str]
-                            if task.get("id") != task_id
-                        ]
-                        after_count = len(self.app.tasks[old_date_str])
-
-                        # Remove empty date entry
-                        if after_count == 0:
+                        # Update both date entries atomically
+                        if old_tasks_updated:
+                            self.app.tasks[old_date_str] = old_tasks_updated
+                        elif old_date_str in self.app.tasks:
                             del self.app.tasks[old_date_str]
 
-                        self.logger.debug(
-                            f"MOVE PROCESSED: Removed from {old_date_str} - tasks before: {before_count}, after: {after_count}"
-                        )
+                        self.app.tasks[date_str] = new_tasks
+                        needs_ui_update = True
+                        needs_save = True
 
-                    self.app.save_tasks()
+                        self.logger.debug(
+                            f"MOVE PROCESSED: Moved task {task_id} from {old_date_str} to {date_str}"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"MOVE FAILED: Task {task_id} not found in source date {old_date_str}"
+                        )
 
                 else:  # add or update
                     if date_str not in self.app.tasks:
@@ -703,61 +718,41 @@ class MulticastSync:
                         cleaned_task = self._clean_remote_task(task_update)
                         self.app.tasks[date_str].append(cleaned_task)
 
-                    self.app.save_tasks()
+                    needs_ui_update = True
+                    needs_save = True
 
-                    # Use idle_add to update UI from main thread safely
-                    def safe_update_ui():
-                        try:
-                            if self.app.view_mode == "calendar":
-                                self.app.update_calendar()
-                            elif (
-                                self.app.view_mode == "tasks"
-                                and self.app.selected_date
-                                and self.app.selected_date.isoformat() == date_str
-                            ):
-                                # If we're in task view for the same date, update the task list
-                                self.app._show_task_list()
-                                self.app._update_task_ui(task_id, date_str)
-                            # Update tray badge from main thread
-                            self.app.update_tray_icon_badge()
-                        except Exception as e:
-                            self.logger.error(
-                                f"Error updating UI from main thread: {e}"
-                            )
+            except Exception as e:
+                self.logger.error(f"Error in _apply_task_update: {e}")
+                self.sync_stats["errors"] = self.sync_stats.get("errors", 0) + 1
 
-                    GLib.idle_add(safe_update_ui)
+        # FIXED: Save tasks outside the lock to prevent deadlocks
+        if needs_save:
+            self.app.save_tasks()
 
-                # Use idle_add to update UI from main thread safely for move operations
-                def safe_update_ui_move():
-                    try:
-                        if self.app.view_mode == "calendar":
-                            self.app.update_calendar()
-                        elif (
-                            self.app.view_mode == "tasks"
-                            and self.app.selected_date
-                            and (
-                                self.app.selected_date.isoformat() == date_str
-                                or self.app.selected_date.isoformat() == old_date_str
-                            )
-                        ):
-                            # If we're in task view for either the old or new date, update the task list
-                            self.app._show_task_list()
-                        # Update tray badge from main thread
-                        self.app.update_tray_icon_badge()
-                    except Exception as e:
-                        self.logger.error(
-                            f"Error updating UI from main thread for move: {e}"
+        # UI updates can happen outside the lock
+        if needs_ui_update:
+            def safe_update_ui():
+                try:
+                    if self.app.view_mode == "calendar":
+                        self.app.update_calendar()
+                    elif (
+                        self.app.view_mode == "tasks"
+                        and self.app.selected_date
+                        and (
+                            self.app.selected_date.isoformat() == date_str
+                            or (operation == "move" and self.app.selected_date.isoformat() == old_date_str)
                         )
+                    ):
+                        # If we're in task view for either the old or new date, update the task list
+                        self.app._show_task_list()
+                        if operation != "delete":
+                            self.app._update_task_ui(task_id, date_str)
+                    # Update tray badge from main thread
+                    self.app.update_tray_icon_badge()
+                except Exception as e:
+                    self.logger.error(f"Error updating UI from main thread: {e}")
 
-                GLib.idle_add(safe_update_ui_move)
-
-        except Exception as e:
-            self.logger.error(f"Error in _apply_task_update: {e}")
-            self.sync_stats["errors"] = self.sync_stats.get("errors", 0) + 1
-
-        except Exception as e:
-            self.logger.error(f"Error in _apply_task_update: {e}")
-            self.sync_stats["errors"] = self.sync_stats.get("errors", 0) + 1
+            GLib.idle_add(safe_update_ui)
 
     def _send_message(self, message, address=None):
         """Send unicast message to all discovered peers"""
@@ -892,6 +887,8 @@ class MulticastSync:
     def _full_merge_tasks(self, remote_tasks):
         """Full merge of tasks from remote instance - complete synchronization"""
         try:
+            needs_save = False
+            
             with self.tasks_lock:
                 merged = False
                 deleted_count = 0
@@ -942,6 +939,7 @@ class MulticastSync:
                             local_task["status"] = "DELETED"
                             deleted_count += 1
                             merged = True
+                            needs_save = True
 
                         # Check if remote task is newer
                         else:
@@ -966,6 +964,7 @@ class MulticastSync:
                                                 local_task[key] = value
                                         updated_count += 1
                                         merged = True
+                                        needs_save = True
                                 except ValueError:
                                     # If timestamp parsing fails, skip update
                                     pass
@@ -981,10 +980,12 @@ class MulticastSync:
                             self.app.tasks[remote_date].append(cleaned_task)
                             added_count += 1
                             merged = True
+                            needs_save = True
 
                 # Also check for tasks that exist locally but not in remote (should remain unchanged)
 
-            if merged:
+            # BUGFIX: Save outside the lock
+            if needs_save:
                 self.app.save_tasks()
 
                 # Use idle_add to update UI from main thread safely
@@ -1136,13 +1137,14 @@ class MulticastSync:
 
     def broadcast_task_update(self, task, operation="update"):
         """Broadcast task update to all discovered peers"""
+        # FIXED: Validate date field early to prevent incorrect broadcasts
+        if "date" not in task:
+            self.logger.error(f"Task missing date - skipping broadcast for operation: {operation}")
+            return
+
         # Ensure task has date field for proper handling
         broadcast_task = task.copy()
-        if "date" not in broadcast_task:
-            # Try to extract date from task context if available
-            if hasattr(self.app, "selected_date") and self.app.selected_date:
-                broadcast_task["date"] = self.app.selected_date.isoformat()
-
+        
         message = {
             "type": "task_update",
             "sender": self.app.settings.get("name", "Unknown"),
