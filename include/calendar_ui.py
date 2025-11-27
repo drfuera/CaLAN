@@ -176,7 +176,7 @@ class CalendarUI:
         # FIXED: Use current_date for "today" highlighting only
         today = self.current_date.date()
         row = 1
-        # FIXED: Remove unused variable next_month_day_counter
+        next_month_day_counter = 1
 
         for week in cal:
             if row == 1:
@@ -194,15 +194,15 @@ class CalendarUI:
                             prev_day, date, False, grayed_out=True
                         )
                     else:
-                        # FIXED: Calculate next month days properly without unused counter
                         next_month = month + 1 if month < 12 else 1
                         next_year = year if month < 12 else year + 1
-                        # Calculate position in the week to determine day number
-                        day_position = (row - 1) * 7 + col - leading_zeros + 1
-                        date = datetime(next_year, next_month, day_position).date()
+                        date = datetime(
+                            next_year, next_month, next_month_day_counter
+                        ).date()
                         cell = self.create_date_cell(
-                            day_position, date, False, grayed_out=True
+                            next_month_day_counter, date, False, grayed_out=True
                         )
+                        next_month_day_counter += 1
                     self.calendar_grid.attach(cell, col, row, 1, 1)
                 else:
                     date = datetime(year, month, day).date()
@@ -289,11 +289,13 @@ class CalendarUI:
         if date_str in self.tasks:
             for i, task in enumerate(self.tasks[date_str][:3]):
                 # BUGGFIX: Ensure task has stable UUID instead of using index as fallback
-                if 'id' not in task or not task['id']:
-                    task['id'] = str(uuid.uuid4())
-                    self.debug_logger.logger.info(f"Generated UUID for task without ID: {task['id']}")
-                
-                task_id = task['id']  # Always use the UUID, never index
+                if "id" not in task or not task["id"]:
+                    task["id"] = str(uuid.uuid4())
+                    self.debug_logger.logger.info(
+                        f"Generated UUID for task without ID: {task['id']}"
+                    )
+
+                task_id = task["id"]  # Always use the UUID, never index
 
                 # Wrap task row in EventBox to make it draggable
                 task_event_box = Gtk.EventBox()
@@ -301,31 +303,25 @@ class CalendarUI:
                 task_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
                 task_row.set_halign(Gtk.Align.START)
 
-                # Color dot or attention indicator - align to top
+                # Color dot - align to top
                 color_dot = Gtk.Label()
                 color_dot.task_ref = task  # FIXED: Set task_ref for blinking cleanup
                 color = task.get("color", "#4CAF50")
 
-                # Check if task needs attention
-                if task.get("needs_attention", False):
-                    if grayed_out:
-                        color_dot.set_markup(
-                            "<span foreground='#ff4444' alpha='50%' size='small' weight='bold'>◉</span>"
-                        )
-                    else:
-                        color_dot.set_markup(
-                            "<span foreground='#ff4444' size='small' weight='bold'>◉</span>"
-                        )
-                    self._add_blinking_effect(color_dot)
+                # Always use the task's color
+                if grayed_out:
+                    color_dot.set_markup(
+                        f"<span foreground='{color}' alpha='50%' size='small'>●</span>"
+                    )
                 else:
-                    if grayed_out:
-                        color_dot.set_markup(
-                            f"<span foreground='{color}' alpha='50%' size='small'>●</span>"
-                        )
-                    else:
-                        color_dot.set_markup(
-                            f"<span foreground='{color}' size='small'>●</span>"
-                        )
+                    color_dot.set_markup(
+                        f"<span foreground='{color}' size='small'>●</span>"
+                    )
+
+                # Add blinking effect if task needs attention
+                if task.get("needs_attention", False):
+                    self._add_blinking_effect(color_dot)
+
                 color_dot.set_valign(Gtk.Align.START)
                 color_dot.set_margin_top(0)
                 task_row.pack_start(color_dot, False, False, 0)
