@@ -34,7 +34,16 @@ class TrayIcon:
 
         # FIXED: Cache font paths during initialization for better performance
         self.font_paths_cache = self._discover_font_paths()
-        self.debug_logger.logger.debug(f"Cached {len(self.font_paths_cache)} font paths")
+        self.debug_logger.logger.debug(
+            f"Cached {len(self.font_paths_cache)} font paths"
+        )
+
+        # Blinking state for tray icon
+        self.tray_blink_timer_id = None
+        self.tray_blink_state = False
+        self.tray_blink_original_icon = None
+        self.tray_blink_badge_icon = None
+        self.tray_blink_transparent_icon = None
 
         # Log icon path for debugging
         if hasattr(self, "icon_path"):
@@ -96,7 +105,11 @@ class TrayIcon:
     def _get_icon_name(self):
         """Get the appropriate icon name or path"""
         # First try custom icon path
-        if hasattr(self, "icon_path") and self.icon_path is not None and os.path.exists(self.icon_path):
+        if (
+            hasattr(self, "icon_path")
+            and self.icon_path is not None
+            and os.path.exists(self.icon_path)
+        ):
             self.debug_logger.logger.debug(f"Using custom icon: {self.icon_path}")
             return self.icon_path
 
@@ -194,6 +207,9 @@ class TrayIcon:
             self.main_app.set_keep_above(True)
             GLib.timeout_add(100, self._reset_keep_above)
 
+            # Stop blinking when app is shown
+            self.stop_tray_blinking()
+
     def _reset_keep_above(self):
         """Reset keep_above after a short delay"""
         self.main_app.set_keep_above(False)
@@ -221,14 +237,31 @@ class TrayIcon:
             today_str = datetime.now().strftime("%Y-%m-%d")
             task_count = len(self.main_app.tasks.get(today_str, []))
 
-            # Only update if task count has changed
+            # Always update _last_badge_count to ensure blinking uses correct count
+            self._last_badge_count = task_count
+
+            # Only update visual badge if task count has changed
             if (
-                hasattr(self, "_last_badge_count")
-                and self._last_badge_count == task_count
+                hasattr(self, "_previous_badge_count")
+                and self._previous_badge_count == task_count
             ):
                 return False  # FIXED: Return False to prevent infinite loop
 
-            self._last_badge_count = task_count
+            self._previous_badge_count = task_count
+
+            # Stop any active blinking to ensure badge is updated correctly
+            if self.tray_blink_timer_id is not None:
+                self.stop_tray_blinking()
+
+            # If app is minimized and task count increased, start blinking
+            if (
+                not self.main_app.get_property("visible")
+                and hasattr(self, "_previous_badge_count")
+                and task_count > self._previous_badge_count
+            ):
+                self.start_tray_blinking()
+
+            self._previous_badge_count = task_count
 
             # Log which tray implementation we're using
             if hasattr(self, "app_indicator"):
@@ -257,6 +290,172 @@ class TrayIcon:
             self.debug_logger.log_exception(e, "update_tray_icon_badge")
 
         return False  # FIXED: Always return False when used as idle callback
+
+    def _create_blinking_icons(self):
+        """Create both normal and transparent icons with badges for blinking"""
+        try:
+            if (
+                hasattr(self, "icon_path")
+                and self.icon_path
+                and os.path.exists(self.icon_path)
+            ):
+                # Load original icon to get dimensions
+                import tempfile
+
+                from PIL import Image, ImageDraw
+
+                original_img = Image.open(self.icon_path).convert("RGBA")
+                width, height = original_img.size
+
+                # Create transparent image with same dimensions
+                transparent_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+                # Create normal icon with badge
+                badge_img = original_img.copy()
+                task_count = getattr(self, "_last_badge_count", 0)
+
+                if task_count > 0:
+                    draw = ImageDraw.Draw(badge_img)
+                    # Draw badge
+                    badge_size = max(int(width * 0.65), 32)
+                    badge_x = width - badge_size - 2
+                    badge_y = 2
+
+                    draw.ellipse(
+                        [badge_x, badge_y, badge_x + badge_size, badge_y + badge_size],
+                        fill="#f44336",
+                        outline="white",
+                        width=3,
+                    )
+
+                    # Draw number
+                    font = self._get_font(int(badge_size * 0.7))
+                    text = str(min(task_count, 99))
+
+                    if font:
+                        bbox = draw.textbbox((0, 0), text, font=font)
+                        text_width = bbox[2] - bbox[0]
+                        text_height = bbox[3] - bbox[1]
+
+                        text_x = badge_x + (badge_size - text_width) // 2
+                        text_y = badge_y + (badge_size - text_height) // 2 - bbox[1]
+
+                        draw.text((text_x, text_y), text, fill="white", font=font)
+                    else:
+                        # Fallback text drawing
+                        text_width = len(text) * 8
+                        text_height = 12
+                        text_x = badge_x + (badge_size - text_width) // 2
+                        text_y = badge_y + (badge_size - text_height) // 2
+                        draw.text((text_x, text_y), text, fill="white")
+
+                # Save icons to temporary files
+                temp_dir = tempfile.gettempdir()
+
+                # Save transparent icon
+                transparent_path = os.path.join(temp_dir, "calan_transparent_icon.png")
+                transparent_img.save(transparent_path, "PNG")
+                self.tray_blink_transparent_icon = transparent_path
+
+                # Save badge icon
+                badge_path = os.path.join(temp_dir, "calan_badge_icon.png")
+                badge_img.save(badge_path, "PNG")
+                self.tray_blink_badge_icon = badge_path
+
+                self.debug_logger.logger.debug(
+                    f"Created blinking icons: transparent={transparent_path}, badge={badge_path}"
+                )
+
+            else:
+                # Fallback: use icon names if available
+                self.tray_blink_transparent_icon = "image-missing"
+                self.tray_blink_badge_icon = self.tray_blink_original_icon
+
+        except Exception as e:
+            self.debug_logger.logger.error(f"Failed to create blinking icons: {e}")
+            # Fallback to using original icon (no blinking)
+            self.tray_blink_transparent_icon = self.tray_blink_original_icon
+            self.tray_blink_badge_icon = self.tray_blink_original_icon
+
+    def start_tray_blinking(self):
+        """Start blinking tray icon when app is minimized and new updates arrive"""
+        if self.tray_blink_timer_id is not None:
+            return  # Already blinking
+
+        self.debug_logger.logger.info("Starting tray icon blinking")
+        self.debug_logger.log_tray_blink(True, "new_updates_detected")
+
+        # Store original icon state
+        self.tray_blink_original_icon = self._get_icon_name()
+        self.tray_blink_state = True
+
+        # Ensure _last_badge_count is up to date before creating blinking icons
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        task_count = len(self.main_app.tasks.get(today_str, []))
+        self._last_badge_count = task_count
+
+        # Create blinking icons (with and without badges)
+        self._create_blinking_icons()
+
+        def blink_callback():
+            if self.tray_blink_timer_id is None:
+                return False
+
+            # Toggle between badge icon and transparent icon
+            if hasattr(self, "app_indicator"):
+                # For AppIndicator, toggle between icons
+                if self.tray_blink_state:
+                    self.app_indicator.set_icon(self.tray_blink_badge_icon)
+                else:
+                    self.app_indicator.set_icon(self.tray_blink_transparent_icon)
+            elif hasattr(self, "tray_icon") and self.tray_icon:
+                # For StatusIcon, toggle between icons
+                if self.tray_blink_state:
+                    if self.tray_blink_badge_icon and os.path.exists(
+                        self.tray_blink_badge_icon
+                    ):
+                        self.tray_icon.set_from_file(self.tray_blink_badge_icon)
+                    else:
+                        self.tray_icon.set_from_icon_name(self.tray_blink_original_icon)
+                else:
+                    if self.tray_blink_transparent_icon and os.path.exists(
+                        self.tray_blink_transparent_icon
+                    ):
+                        self.tray_icon.set_from_file(self.tray_blink_transparent_icon)
+                    else:
+                        self.tray_icon.set_from_icon_name("image-missing")  # Fallback
+
+            self.tray_blink_state = not self.tray_blink_state
+            return True  # Continue blinking
+
+        # Start blinking every 500ms
+        self.tray_blink_timer_id = GLib.timeout_add(500, blink_callback)
+
+    def stop_tray_blinking(self):
+        """Stop blinking tray icon and restore normal state"""
+        if self.tray_blink_timer_id is not None:
+            self.debug_logger.logger.info("Stopping tray icon blinking")
+            self.debug_logger.log_tray_blink(False, "app_restored")
+            GLib.source_remove(self.tray_blink_timer_id)
+            self.tray_blink_timer_id = None
+
+            # Restore original icon and badge
+            if hasattr(self, "app_indicator"):
+                self.app_indicator.set_icon(self.tray_blink_original_icon)
+            elif hasattr(self, "tray_icon") and self.tray_icon:
+                if self.tray_blink_original_icon and os.path.exists(
+                    self.tray_blink_original_icon
+                ):
+                    self.tray_icon.set_from_file(self.tray_blink_original_icon)
+                else:
+                    self.tray_icon.set_from_icon_name(self.tray_blink_original_icon)
+                # Restore badge using the normal update method
+                self._update_status_icon_badge(self._last_badge_count)
+
+            self.tray_blink_state = False
+            self.tray_blink_original_icon = None
+            self.tray_blink_transparent_icon = None
+            self.tray_blink_badge_icon = None
 
     def _update_app_indicator_badge(self, task_count):
         """Update AppIndicator badge"""
@@ -342,9 +541,7 @@ class TrayIcon:
             try:
                 img = Image.open(icon_path).convert("RGBA")
             except Exception as e:
-                self.debug_logger.logger.error(
-                    f"Failed to load icon {icon_path}: {e}"
-                )
+                self.debug_logger.logger.error(f"Failed to load icon {icon_path}: {e}")
                 return
 
             if task_count > 0:
@@ -488,6 +685,7 @@ class TrayIcon:
         # Also try to use system fontconfig if available - MOST EFFICIENT
         try:
             import subprocess
+
             result = subprocess.run(
                 ["fc-match", "-f", "%{file}", "sans:bold"],
                 capture_output=True,
@@ -514,6 +712,11 @@ class TrayIcon:
     def quit_application(self):
         """Clean application quit"""
         self.debug_logger.logger.debug("TrayIcon: Cleaning up")
+
+        # Stop blinking timer
+        if self.tray_blink_timer_id is not None:
+            GLib.source_remove(self.tray_blink_timer_id)
+            self.tray_blink_timer_id = None
 
         # Hide tray icons
         if hasattr(self, "tray_icon") and self.tray_icon:
