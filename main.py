@@ -363,6 +363,12 @@ class CalendarApp(
             GLib.source_remove(self.periodic_state_timer_id)
             self.periodic_state_timer_id = None
 
+        # Clean up all blinking timers
+        if hasattr(self, "_attention_blink_timers"):
+            for timer_id in self._attention_blink_timers.values():
+                GLib.source_remove(timer_id)
+            self._attention_blink_timers.clear()
+
         # Log final state (debug only)
         self.debug_logger.log_comprehensive_state()
         self.debug_logger.logger.debug("Application quit complete")
@@ -450,11 +456,17 @@ class CalendarApp(
             self.debug_logger.log_exception(e, "save_tasks")
 
     def _add_blinking_effect(self, widget):
-        """Add blinking effect to a widget"""
+        """Add blinking effect to a widget - FIXED: Remove self-assignment and add validation"""
         if not hasattr(self, "_attention_blink_timers"):
             self._attention_blink_timers = {}
 
         widget_id = id(widget)
+
+        # FIXED: Validate task_ref is set instead of self-assignment
+        if not hasattr(widget, 'task_ref'):
+            self.debug_logger.logger.warning(
+                f"Widget {widget_id} missing task_ref - blinking cleanup may fail"
+            )
 
         def blink_callback():
             if (
@@ -474,10 +486,6 @@ class CalendarApp(
             self._attention_widgets = {}
         self._attention_widgets[widget_id] = widget
 
-        # Store task reference for proper cleanup
-        if hasattr(widget, 'task_ref'):
-            widget.task_ref = widget.task_ref
-
         # Add destroy callback to clean up timer when widget is destroyed
         def on_widget_destroy(widget):
             if (
@@ -495,18 +503,25 @@ class CalendarApp(
         widget.connect("destroy", on_widget_destroy)
 
     def _stop_blinking_for_task(self, task):
-        """Stop blinking effect for a specific task - FIXED MEMORY LEAK"""
+        """Stop blinking effect for a specific task - FIXED: Improved cleanup with task ID matching"""
         if (
             not hasattr(self, "_attention_blink_timers")
             or not self._attention_blink_timers
         ):
             return
 
-        # Find widgets that belong to this specific task
+        # Use task ID for matching to avoid reference issues
+        task_id = task.get("id")
+        if not task_id:
+            return
+
         widgets_to_remove = []
         for widget_id, widget in getattr(self, "_attention_widgets", {}).items():
-            if hasattr(widget, 'task_ref') and widget.task_ref == task:
-                widgets_to_remove.append(widget_id)
+            # Match by task ID instead of object identity
+            if hasattr(widget, 'task_ref'):
+                widget_task_id = widget.task_ref.get("id")
+                if widget_task_id == task_id:
+                    widgets_to_remove.append(widget_id)
 
         # Remove only the timers and widgets for this specific task
         for widget_id in widgets_to_remove:
@@ -520,7 +535,10 @@ class CalendarApp(
                 # Disconnect any signals
                 if hasattr(widget, '_blink_connections'):
                     for conn_id in widget._blink_connections:
-                        widget.disconnect(conn_id)
+                        try:
+                            widget.disconnect(conn_id)
+                        except:
+                            pass
                 del self._attention_widgets[widget_id]
 
         # FIXED: Additional cleanup to prevent memory leaks
