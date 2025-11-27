@@ -172,7 +172,7 @@ class CalendarUI:
         # FIXED: Use current_date for "today" highlighting only
         today = self.current_date.date()
         row = 1
-        next_month_day_counter = 1
+        # FIXED: Remove unused variable next_month_day_counter
 
         for week in cal:
             if row == 1:
@@ -190,15 +190,15 @@ class CalendarUI:
                             prev_day, date, False, grayed_out=True
                         )
                     else:
+                        # FIXED: Calculate next month days properly without unused counter
                         next_month = month + 1 if month < 12 else 1
                         next_year = year if month < 12 else year + 1
-                        date = datetime(
-                            next_year, next_month, next_month_day_counter
-                        ).date()
+                        # Calculate position in the week to determine day number
+                        day_position = (row - 1) * 7 + col - leading_zeros + 1
+                        date = datetime(next_year, next_month, day_position).date()
                         cell = self.create_date_cell(
-                            next_month_day_counter, date, False, grayed_out=True
+                            day_position, date, False, grayed_out=True
                         )
-                        next_month_day_counter += 1
                     self.calendar_grid.attach(cell, col, row, 1, 1)
                 else:
                     date = datetime(year, month, day).date()
@@ -549,9 +549,11 @@ class CalendarUI:
                     drag_info = json.loads(drag_text)
                     source_date_str = drag_info["date"]
                     task_id = drag_info["task_id"]
-                except (json.JSONDecodeError, KeyError):
-                    source_date_str = drag_text
-                    task_id = None
+                except (json.JSONDecodeError, KeyError) as e:
+                    # BUGFIX: Don't use invalid fallback data - abort the operation
+                    self.debug_logger.logger.warning(f"Invalid drag data format: {e}")
+                    drag_context.finish(False, False, time)
+                    return
 
                 source_date = datetime.fromisoformat(source_date_str).date()
                 target_date_str = target_date.isoformat()
@@ -564,6 +566,7 @@ class CalendarUI:
                     task_to_move = None
                     task_index = None
 
+                    # FIXED: Don't move wrong task if ID not found
                     if task_id is not None:
                         for i, task in enumerate(self.tasks[source_date_str]):
                             if task.get("id", str(i)) == task_id:
@@ -571,9 +574,13 @@ class CalendarUI:
                                 task_index = i
                                 break
 
+                    # FIXED: Abort if task not found instead of moving wrong task
                     if task_to_move is None:
-                        task_to_move = self.tasks[source_date_str][0]
-                        task_index = 0
+                        self.debug_logger.logger.warning(
+                            f"Task with ID {task_id} not found in source date {source_date_str}"
+                        )
+                        drag_context.finish(False, False, time)
+                        return
 
                     # Add task to target FIRST to prevent data loss
                     if target_date_str not in self.tasks:
@@ -640,7 +647,7 @@ class CalendarUI:
                     return
 
             except (ValueError, KeyError) as e:
-                pass
+                self.debug_logger.logger.error(f"Error processing drag data: {e}")
 
     def on_previous_month(self, widget):
         """Navigate to previous month"""
