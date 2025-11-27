@@ -2,7 +2,7 @@
 
 GTK3 desktop calendar focused on fast task entry, local-first storage, live tray feedback, and zero-config multi-instance synchronization.
 
-![CaLAN Screenshot](screenshots/calan.png)
+![CaLAN Screenshot](screenshot.png)
 
 ---
 
