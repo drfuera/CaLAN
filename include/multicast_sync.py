@@ -330,7 +330,6 @@ class MulticastSync:
         self.logger.info("Unicast listener loop started")
         while self.running and self.socket:
             try:
-                self.logger.debug("Waiting for incoming unicast message...")
                 data, address = self.socket.recvfrom(1024)
                 self.logger.debug(f"Received {len(data)} bytes from {address}")
                 self._handle_message(data, address)
@@ -352,14 +351,14 @@ class MulticastSync:
             self.logger.info(
                 f"Received unicast message from {address}, size: {len(data)} bytes"
             )
-            
+
             # BUGFIX: Proper JSON decode error handling with early return
             try:
                 message = json.loads(data.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 self.logger.warning(f"Invalid message from {address}: {e}")
                 return  # Early return on invalid message
-            
+
             message_type = message.get("type")
 
             self.logger.info(
@@ -450,6 +449,8 @@ class MulticastSync:
                         for remote_task in remote_task_list:
                             # Ensure task has all required fields
                             cleaned_task = self._clean_remote_task(remote_task)
+                            # Mark as needing attention (new task from remote)
+                            cleaned_task["needs_attention"] = True
                             self.app.tasks[date_str].append(cleaned_task)
                         merged = True
                     else:
@@ -465,6 +466,8 @@ class MulticastSync:
                                 # Only add tasks that don't exist locally
                                 # Ensure task has all required fields
                                 cleaned_task = self._clean_remote_task(remote_task)
+                                # Mark as needing attention (new task from remote)
+                                cleaned_task["needs_attention"] = True
                                 local_tasks.append(cleaned_task)
                                 merged = True
                             elif remote_task_id and remote_task_id in local_task_ids:
@@ -508,6 +511,8 @@ class MulticastSync:
                                                         key != "id"
                                                     ):  # Don't change the ID
                                                         local_task[key] = value
+                                                # Mark as needing attention (updated from remote)
+                                                local_task["needs_attention"] = True
                                                 merged = True
                                         except ValueError:
                                             # If timestamp parsing fails, track as error
@@ -522,6 +527,8 @@ class MulticastSync:
                                         for key, value in remote_task.items():
                                             if key != "id":  # Don't change the ID
                                                 local_task[key] = value
+                                        # Mark as needing attention (updated from remote)
+                                        local_task["needs_attention"] = True
                                         merged = True
 
             # BUGFIX: Move save_tasks outside the lock to prevent deadlocks
@@ -542,6 +549,10 @@ class MulticastSync:
                             self.app._show_task_list()
                         # Update tray badge from main thread
                         self.app.update_tray_icon_badge()
+
+                        # Start tray blinking if app is minimized and new tasks were added
+                        if not self.app.get_property("visible"):
+                            self.app.start_tray_blinking()
                     except Exception as e:
                         self.logger.error(f"Error updating UI from main thread: {e}")
 
@@ -561,7 +572,7 @@ class MulticastSync:
         needs_save = False
         date_str = None
         old_date_str = None
-        
+
         # FIXED: Use proper locking for ALL operations
         with self.tasks_lock:
             try:
@@ -628,7 +639,9 @@ class MulticastSync:
 
                     # Validate both dates exist in tasks
                     if old_date_str not in self.app.tasks:
-                        self.logger.warning(f"Source date {old_date_str} not found in tasks")
+                        self.logger.warning(
+                            f"Source date {old_date_str} not found in tasks"
+                        )
                         return
 
                     # Create copies to work with
@@ -648,7 +661,9 @@ class MulticastSync:
                         # Update task with new date and timestamp
                         task_to_move = task_to_move.copy()
                         task_to_move["updated_at"] = datetime.now().isoformat()
-                        
+                        # Mark as needing attention (moved from remote)
+                        task_to_move["needs_attention"] = True
+
                         # Add to new date
                         new_tasks.append(task_to_move)
 
@@ -712,10 +727,14 @@ class MulticastSync:
 
                         # Ensure task has all required fields when updating
                         cleaned_task = self._clean_remote_task(task_update)
+                        # Mark as needing attention (updated from remote)
+                        cleaned_task["needs_attention"] = True
                         self.app.tasks[date_str][existing_index] = cleaned_task
                     else:
                         # Ensure task has all required fields when adding
                         cleaned_task = self._clean_remote_task(task_update)
+                        # Mark as needing attention (new task from remote)
+                        cleaned_task["needs_attention"] = True
                         self.app.tasks[date_str].append(cleaned_task)
 
                     needs_ui_update = True
@@ -731,6 +750,7 @@ class MulticastSync:
 
         # UI updates can happen outside the lock
         if needs_ui_update:
+
             def safe_update_ui():
                 try:
                     if self.app.view_mode == "calendar":
@@ -740,7 +760,10 @@ class MulticastSync:
                         and self.app.selected_date
                         and (
                             self.app.selected_date.isoformat() == date_str
-                            or (operation == "move" and self.app.selected_date.isoformat() == old_date_str)
+                            or (
+                                operation == "move"
+                                and self.app.selected_date.isoformat() == old_date_str
+                            )
                         )
                     ):
                         # If we're in task view for either the old or new date, update the task list
@@ -749,6 +772,10 @@ class MulticastSync:
                             self.app._update_task_ui(task_id, date_str)
                     # Update tray badge from main thread
                     self.app.update_tray_icon_badge()
+
+                    # Start tray blinking if app is minimized and new tasks were added
+                    if not self.app.get_property("visible"):
+                        self.app.start_tray_blinking()
                 except Exception as e:
                     self.logger.error(f"Error updating UI from main thread: {e}")
 
@@ -888,7 +915,7 @@ class MulticastSync:
         """Full merge of tasks from remote instance - complete synchronization"""
         try:
             needs_save = False
-            
+
             with self.tasks_lock:
                 merged = False
                 deleted_count = 0
@@ -962,6 +989,8 @@ class MulticastSync:
                                         for key, value in remote_task.items():
                                             if key != "id":  # Don't change the ID
                                                 local_task[key] = value
+                                        # Mark as needing attention (updated from remote)
+                                        local_task["needs_attention"] = True
                                         updated_count += 1
                                         merged = True
                                         needs_save = True
@@ -977,6 +1006,8 @@ class MulticastSync:
 
                             # Ensure task has all required fields
                             cleaned_task = self._clean_remote_task(remote_task)
+                            # Mark as needing attention (new task from remote)
+                            cleaned_task["needs_attention"] = True
                             self.app.tasks[remote_date].append(cleaned_task)
                             added_count += 1
                             merged = True
@@ -995,6 +1026,10 @@ class MulticastSync:
                             self.app.update_calendar()
                         # Update tray badge from main thread
                         self.app.update_tray_icon_badge()
+
+                        # Start tray blinking if app is minimized and new tasks were added
+                        if not self.app.get_property("visible"):
+                            self.app.start_tray_blinking()
                     except Exception as e:
                         self.logger.error(f"Error updating UI from main thread: {e}")
                     return False
@@ -1139,12 +1174,14 @@ class MulticastSync:
         """Broadcast task update to all discovered peers"""
         # FIXED: Validate date field early to prevent incorrect broadcasts
         if "date" not in task:
-            self.logger.error(f"Task missing date - skipping broadcast for operation: {operation}")
+            self.logger.error(
+                f"Task missing date - skipping broadcast for operation: {operation}"
+            )
             return
 
         # Ensure task has date field for proper handling
         broadcast_task = task.copy()
-        
+
         message = {
             "type": "task_update",
             "sender": self.app.settings.get("name", "Unknown"),
